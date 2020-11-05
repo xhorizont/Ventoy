@@ -803,6 +803,7 @@ run_menu (grub_menu_t menu, int nested, int *auto_boot)
 	      goto refresh;
 
         case GRUB_TERM_KEY_F2:
+        case '2':
             if (0 == g_ventoy_fn_mutex) {
                 cmdstr = grub_env_get("VTOY_F2_CMD");
                 if (cmdstr)
@@ -816,6 +817,7 @@ run_menu (grub_menu_t menu, int nested, int *auto_boot)
             }
             break;
         case GRUB_TERM_KEY_F3:
+        case '3':
             if (0 == g_ventoy_fn_mutex) {
                 cmdstr = grub_env_get("VTOY_F3_CMD");
                 if (cmdstr)
@@ -827,6 +829,7 @@ run_menu (grub_menu_t menu, int nested, int *auto_boot)
             }
             break;
         case GRUB_TERM_KEY_F4:
+        case '4':
             if (0 == g_ventoy_fn_mutex) {
                 cmdstr = grub_env_get("VTOY_F4_CMD");
                 if (cmdstr)
@@ -840,6 +843,7 @@ run_menu (grub_menu_t menu, int nested, int *auto_boot)
             }
             break;
         case GRUB_TERM_KEY_F5:
+        case '5':
             if (0 == g_ventoy_fn_mutex) {
                 cmdstr = grub_env_get("VTOY_F5_CMD");
                 if (cmdstr)
@@ -853,15 +857,21 @@ run_menu (grub_menu_t menu, int nested, int *auto_boot)
             }
             break;
         case GRUB_TERM_KEY_F6:
-            cmdstr = grub_env_get("VTOY_F6_CMD");
-            if (cmdstr)
-            {
-                menu_fini ();
-                grub_script_execute_sourcecode(cmdstr);
-                goto refresh;
+        case '6':
+            if (0 == g_ventoy_fn_mutex) {
+                cmdstr = grub_env_get("VTOY_F6_CMD");
+                if (cmdstr)
+                {
+                    menu_fini ();
+                    g_ventoy_fn_mutex = 1;
+                    grub_script_execute_sourcecode(cmdstr);
+                    g_ventoy_fn_mutex = 0;
+                    goto refresh;
+                }
             }
             break;
         case GRUB_TERM_KEY_F7:
+        case '7':
             cmdstr = grub_env_get("VTOY_F7_CMD");
             if (cmdstr)
             {
@@ -871,6 +881,7 @@ run_menu (grub_menu_t menu, int nested, int *auto_boot)
             }
             break;
         case GRUB_TERM_KEY_F1:
+        case '1':
             menu_fini ();
             g_ventoy_memdisk_mode = 1 - g_ventoy_memdisk_mode;
             g_ventoy_menu_refresh = 1;
@@ -958,19 +969,28 @@ static struct grub_menu_execute_callback execution_callback =
 static grub_err_t
 show_menu (grub_menu_t menu, int nested, int autobooted)
 {
+    const char *def;    
+    def = grub_env_get("VTOY_DEFAULT_IMAGE");
+    
   while (1)
     {
       int boot_entry;
       grub_menu_entry_t e;
       int auto_boot;
-
+      
       boot_entry = run_menu (menu, nested, &auto_boot);
       if (boot_entry < 0)
 	break;
 
-      g_ventoy_last_entry = boot_entry;
-      if (g_ventoy_menu_esc)
-          break;
+      if (auto_boot && def && grub_strcmp(def, "VTOY_EXIT") == 0) {
+          grub_exit();
+      }
+
+      if (autobooted == 0 && auto_boot == 0) {
+          g_ventoy_last_entry = boot_entry;
+          if (g_ventoy_menu_esc)
+              break;          
+      }
 
       e = grub_menu_get_entry (menu, boot_entry);
       if (! e)
@@ -988,6 +1008,9 @@ show_menu (grub_menu_t menu, int nested, int autobooted)
 	grub_menu_execute_entry (e, 0);
       if (autobooted)
 	break;
+
+      if (2 == e->argc && e->args && e->args[1] && grub_strncmp(e->args[1], "VTOY_RUN_RET", 12) == 0)
+        break; 
     }
 
   return GRUB_ERR_NONE;

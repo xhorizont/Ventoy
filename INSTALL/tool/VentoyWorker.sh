@@ -3,18 +3,20 @@
 . ./tool/ventoy_lib.sh
 
 print_usage() {
+    
     echo 'Usage:  Ventoy2Disk.sh CMD [ OPTION ] /dev/sdX'
     echo '  CMD:'
     echo '   -i  install ventoy to sdX (fail if disk already installed with ventoy)'
-    echo '   -u  update ventoy in sdX'
     echo '   -I  force install ventoy to sdX (no matter installed or not)'
+    echo '   -u  update ventoy in sdX'
     echo ''
     echo '  OPTION: (optional)'
     echo '   -r SIZE_MB  preserve some space at the bottom of the disk (only for install)'
     echo '   -s          enable secure boot support (default is disabled)'
+    echo '   -g          use GPT partition style, default is MBR (only for install)'
     echo ''
-    
 }
+
 
 RESERVE_SIZE_MB=0
 while [ -n "$1" ]; do
@@ -27,10 +29,17 @@ while [ -n "$1" ]; do
         MODE="update"
     elif [ "$1" = "-s" ]; then
         SECUREBOOT="YES"
+    elif [ "$1" = "-g" ]; then
+        VTGPT="YES"
     elif [ "$1" = "-r" ]; then
         RESERVE_SPACE="YES"
         shift
         RESERVE_SIZE_MB=$1
+    elif [ "$1" = "-V" ] || [ "$1" = "--version" ]; then
+        exit 0
+    elif [ "$1" == "-h" ] || [ "$1" = "--help" ]; then
+        print_usage
+        exit 0
     else
         if ! [ -b "$1" ]; then
             vterr "$1 is NOT a valid device"
@@ -54,7 +63,11 @@ if ! [ -b "$DISK" ]; then
 fi
 
 if [ -e /sys/class/block/${DISK#/dev/}/start ]; then
-    vterr "$DISK is a partition, please use the whole disk"
+    vterr  "$DISK is a partition, please use the whole disk."
+    echo   "For example:"
+    vterr  "    sudo sh Ventoy2Disk.sh -i /dev/sdX1 <=== This is wrong"
+    vtinfo "    sudo sh Ventoy2Disk.sh -i /dev/sdX  <=== This is right"
+    echo ""
     exit 1
 fi
 
@@ -67,6 +80,7 @@ if [ -n "$RESERVE_SPACE" ]; then
     fi
 fi
 
+#check access 
 if dd if="$DISK" of=/dev/null bs=1 count=1 >/dev/null 2>&1; then
     vtdebug "root permission check ok ..."
 else
@@ -77,46 +91,55 @@ fi
 
 vtdebug "MODE=$MODE FORCE=$FORCE RESERVE_SPACE=$RESERVE_SPACE RESERVE_SIZE_MB=$RESERVE_SIZE_MB"
 
-if ! check_tool_work_ok; then
+#check tools
+if check_tool_work_ok; then
+    vtdebug "check tool work ok"
+else
     vterr "Some tools can not run in current system. Please check log.txt for detail."
     exit 1
 fi
 
+#check mountpoint
 grep "^$DISK" /proc/mounts | while read mtline; do
     mtpnt=$(echo $mtline | awk '{print $2}')
     vtdebug "Trying to umount $mtpnt ..."
     umount $mtpnt >/dev/null 2>&1
 done
 
-if swapon -s | grep -q "^${DISK}[0-9]"; then
-    swapon -s | grep "^${DISK}[0-9]" | awk '{print $1}' | while read line; do
-        vtdebug "Trying to swapoff $line ..."
-        swapoff $line
-    done
-fi
-
-
 if grep "$DISK" /proc/mounts; then
     vterr "$DISK is already mounted, please umount it first!"
     exit 1
 fi
 
-if swapon -s | grep -q "^${DISK}[0-9]"; then
-    vterr "$DISK is used as swap, please swapoff it first!"
-    exit 1
+#check swap partition
+if swapon --help 2>&1 | grep -q '^ \-s,'; then
+    if swapon -s | grep -q "^${DISK}[0-9]"; then
+        vterr "$DISK is used as swap, please swapoff it first!"
+        exit 1
+    fi
 fi
 
 
 if [ "$MODE" = "install" ]; then
     vtdebug "install ventoy ..."
 
-    if parted -v > /dev/null 2>&1; then
-        PARTTOOL='parted'
-    elif fdisk -v >/dev/null 2>&1; then
-        PARTTOOL='fdisk'
+    if [ -n "$VTGPT" ]; then
+        if parted -v > /dev/null 2>&1; then
+            PARTTOOL='parted'
+        else
+            vterr "parted is not found in the system, Ventoy can't create new partitions without it."
+            vterr "You should install \"GNU parted\" first."
+            exit 1
+        fi
     else
-        vterr "Both parted and fdisk are not found in the sysstem, Ventoy can't create new partition."
-        exit 1
+        if parted -v > /dev/null 2>&1; then
+            PARTTOOL='parted'
+        elif fdisk -v >/dev/null 2>&1; then
+            PARTTOOL='fdisk'
+        else
+            vterr "Both parted and fdisk are not found in the system, Ventoy can't create new partitions."
+            exit 1
+        fi
     fi
     
     version=$(get_disk_ventoy_version $DISK)
@@ -133,7 +156,7 @@ if [ "$MODE" = "install" ]; then
     disk_sector_num=$(cat /sys/block/${DISK#/dev/}/size)
     disk_size_gb=$(expr $disk_sector_num / 2097152)
 
-    if [ $disk_sector_num -gt 4294967296 ]; then
+    if [ $disk_sector_num -gt 4294967296 ] && [ -z "$VTGPT" ]; then
         vterr "$DISK is over 2TB size, MBR will not work on it."
         exit 1
     fi
@@ -148,11 +171,15 @@ if [ "$MODE" = "install" ]; then
         fi
     fi
 
-
     #Print disk info
     echo "Disk : $DISK"
     parted -s $DISK p 2>&1 | grep Model
-    echo "Size : $disk_size_gb GB"
+    echo "Size : $disk_size_gb GB"    
+    if [ -n "$VTGPT" ]; then
+        echo "Style: GPT"
+    else
+        echo "Style: MBR"
+    fi    
     echo ''
 
     if [ -n "$RESERVE_SPACE" ]; then
@@ -165,7 +192,7 @@ if [ "$MODE" = "install" ]; then
     vtwarn "All the data on the disk $DISK will be lost!!!"
     echo ""
 
-    read -p 'Continue? (y/n)'  Answer
+    read -p 'Continue? (y/n) '  Answer
     if [ "$Answer" != "y" ]; then
         if [ "$Answer" != "Y" ]; then
             exit 0
@@ -174,13 +201,12 @@ if [ "$MODE" = "install" ]; then
 
     echo ""
     vtwarn "All the data on the disk $DISK will be lost!!!"
-    read -p 'Double-check. Continue? (y/n)'  Answer
+    read -p 'Double-check. Continue? (y/n) '  Answer
     if [ "$Answer" != "y" ]; then
         if [ "$Answer" != "Y" ]; then
             exit 0
         fi
     fi
-
 
     if [ $disk_sector_num -le $VENTOY_SECTOR_NUM ]; then  
         vterr "No enough space in disk $DISK"
@@ -192,7 +218,13 @@ if [ "$MODE" = "install" ]; then
         exit 1
     fi
 
-    format_ventoy_disk $RESERVE_SIZE_MB $DISK $PARTTOOL
+    if [ -n "$VTGPT" ]; then
+        vtdebug "format_ventoy_disk_gpt $RESERVE_SIZE_MB $DISK $PARTTOOL ..."
+        format_ventoy_disk_gpt $RESERVE_SIZE_MB $DISK $PARTTOOL
+    else
+        vtdebug "format_ventoy_disk_mbr $RESERVE_SIZE_MB $DISK $PARTTOOL ..."
+        format_ventoy_disk_mbr $RESERVE_SIZE_MB $DISK $PARTTOOL
+    fi
 
     # format part1
     if ventoy_is_linux64; then
@@ -201,7 +233,9 @@ if [ "$MODE" = "install" ]; then
         cmd=./tool/mkexfatfs_32
     fi
 
-    chmod +x ./tool/*
+    if [ -d ./tool/ ]; then 
+        chmod +x -R ./tool/
+    fi
 
     # DiskSize > 32GB  Cluster Size use 128KB
     # DiskSize < 32GB  Cluster Size use 32KB
@@ -211,14 +245,24 @@ if [ "$MODE" = "install" ]; then
         cluster_sectors=64
     fi
 
-    $cmd -n ventoy -s $cluster_sectors ${DISK}1
+    PART1=$(get_disk_part_name $DISK 1)  
+    PART2=$(get_disk_part_name $DISK 2)  
 
-    chmod +x ./tool/vtoy_gen_uuid
+    $cmd -n ventoy -s $cluster_sectors ${PART1}
 
     vtinfo "writing data to disk ..."
+    
     dd status=none conv=fsync if=./boot/boot.img of=$DISK bs=1 count=446
-    ./tool/xzcat ./boot/core.img.xz | dd status=none conv=fsync of=$DISK bs=512 count=2047 seek=1
-    ./tool/xzcat ./ventoy/ventoy.disk.img.xz | dd status=none conv=fsync of=$DISK bs=512 count=$VENTOY_SECTOR_NUM seek=$part2_start_sector
+    
+    if [ -n "$VTGPT" ]; then
+        echo -en '\x22' | dd status=none of=$DISK conv=fsync bs=1 count=1 seek=92        
+        xzcat ./boot/core.img.xz | dd status=none conv=fsync of=$DISK bs=512 count=2014 seek=34
+        echo -en '\x23' | dd of=$DISK conv=fsync bs=1 count=1 seek=17908 status=none
+    else
+        xzcat ./boot/core.img.xz | dd status=none conv=fsync of=$DISK bs=512 count=2047 seek=1
+    fi
+    
+    xzcat ./ventoy/ventoy.disk.img.xz | dd status=none conv=fsync of=$DISK bs=512 count=$VENTOY_SECTOR_NUM seek=$part2_start_sector
     
     #disk uuid
     ./tool/vtoy_gen_uuid | dd status=none conv=fsync of=${DISK} seek=384 bs=1 count=16
@@ -232,7 +276,7 @@ if [ "$MODE" = "install" ]; then
     vtinfo "esp partition processing ..."
     
     sleep 1
-    mtpnt=$(grep "^${DISK}2" /proc/mounts | awk '{print $2}')
+    mtpnt=$(grep "^${PART2}" /proc/mounts | awk '{print $2}')
     if [ -n "$mtpnt" ]; then
         umount $mtpnt >/dev/null 2>&1
     fi
@@ -242,12 +286,12 @@ if [ "$MODE" = "install" ]; then
         
         vtdebug "mounting part2 ...."
         for tt in 1 2 3; do
-            if mount ${DISK}2 ./tmp_mnt; then
+            if mount ${PART2} ./tmp_mnt; then
                 vtdebug "mounting part2 success"
                 break
             fi
             
-            mtpnt=$(grep "^${DISK}2" /proc/mounts | awk '{print $2}')
+            mtpnt=$(grep "^${PART2}" /proc/mounts | awk '{print $2}')
             if [ -n "$mtpnt" ]; then
                 umount $mtpnt >/dev/null 2>&1
             fi
@@ -296,20 +340,29 @@ else
     SHORT_PART2=${PART2#/dev/}
     part2_start=$(cat /sys/class/block/$SHORT_PART2/start)
     
-    dd status=none conv=fsync if=./boot/boot.img of=$DISK bs=1 count=440
+    PART1_TYPE=$(dd if=$DISK bs=1 count=1 skip=450 status=none | ./tool/hexdump -n1 -e  '1/1 "%02X"')
     
-    PART1_ACTIVE=$(dd if=$DISK bs=1 count=1 skip=446 status=none | ./tool/hexdump -n1 -e  '1/1 "%02X"')
-    PART2_ACTIVE=$(dd if=$DISK bs=1 count=1 skip=462 status=none | ./tool/hexdump -n1 -e  '1/1 "%02X"')
+    if [ "$PART1_TYPE" = "EE" ]; then
+        vtdebug "This is GPT partition style ..."        
+        xzcat ./boot/core.img.xz | dd status=none conv=fsync of=$DISK bs=512 count=2014 seek=34
+        echo -en '\x23' | dd of=$DISK conv=fsync bs=1 count=1 seek=17908 status=none
+    else
+        vtdebug "This is MBR partition style ..."
+        dd status=none conv=fsync if=./boot/boot.img of=$DISK bs=1 count=440
     
-    vtdebug "PART1_ACTIVE=$PART1_ACTIVE  PART2_ACTIVE=$PART2_ACTIVE"
-    if [ "$PART1_ACTIVE" = "00" ] && [ "$PART2_ACTIVE" = "80" ]; then
-        vtdebug "change 1st partition active, 2nd partition inactive ..."
-        echo -en '\x80' | dd of=$DISK conv=fsync bs=1 count=1 seek=446 status=none
-        echo -en '\x00' | dd of=$DISK conv=fsync bs=1 count=1 seek=462 status=none
+        PART1_ACTIVE=$(dd if=$DISK bs=1 count=1 skip=446 status=none | ./tool/hexdump -n1 -e  '1/1 "%02X"')
+        PART2_ACTIVE=$(dd if=$DISK bs=1 count=1 skip=462 status=none | ./tool/hexdump -n1 -e  '1/1 "%02X"')
+        
+        vtdebug "PART1_ACTIVE=$PART1_ACTIVE  PART2_ACTIVE=$PART2_ACTIVE"
+        if [ "$PART1_ACTIVE" = "00" ] && [ "$PART2_ACTIVE" = "80" ]; then
+            vtdebug "change 1st partition active, 2nd partition inactive ..."
+            echo -en '\x80' | dd of=$DISK conv=fsync bs=1 count=1 seek=446 status=none
+            echo -en '\x00' | dd of=$DISK conv=fsync bs=1 count=1 seek=462 status=none
+        fi
+        xzcat ./boot/core.img.xz | dd status=none conv=fsync of=$DISK bs=512 count=2047 seek=1
     fi
-    
-    ./tool/xzcat ./boot/core.img.xz | dd status=none conv=fsync of=$DISK bs=512 count=2047 seek=1  
-    ./tool/xzcat ./ventoy/ventoy.disk.img.xz | dd status=none conv=fsync of=$DISK bs=512 count=$VENTOY_SECTOR_NUM seek=$part2_start
+
+    xzcat ./ventoy/ventoy.disk.img.xz | dd status=none conv=fsync of=$DISK bs=512 count=$VENTOY_SECTOR_NUM seek=$part2_start
 
     sync
     
@@ -318,7 +371,7 @@ else
         
         vtdebug "mounting part2 ...."
         for tt in 1 2 3; do
-            if mount ${DISK}2 ./tmp_mnt; then
+            if mount ${PART2} ./tmp_mnt; then
                 vtdebug "mounting part2 success"
                 break
             fi
